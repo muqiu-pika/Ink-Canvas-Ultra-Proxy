@@ -181,6 +181,17 @@ EdgeOne Edge Functions 的两条硬约束直接决定了实现方式：
 回源时 `fetch` 使用 `redirect: 'follow'`，因此 `github.com/.../releases/download/...` 的 302
 （跳到 `objects.githubusercontent.com`）会自动跟随，客户端拿到的是 200 + 文件流。
 
+### 一个已经踩过的坑：不要依赖 `context.params`
+
+catch-all 路由（`[[default]]`）的参数形态在不同平台 / 版本下并不一致：可能是字符串、数组，也可能被 URL 编码
+（斜杠变成 `%2F`）。最初的实现直接读 `context.params.default`，结果所有请求都解析失败，统一报
+「400 无法解析的代理路径」。
+
+现在的做法：**一律用 `request.url` 的 pathname 取路径**（`pickPath()`），`params` 只作为兜底；
+`normalizePath()` 再兼容数组、对象、URL 编码、`gh/` 前缀、`https:/` 折叠等形态。
+一旦仍有解析失败，响应头会回显 `x-proxy-raw`（平台传进来的原始值）与 `x-proxy-path`（归一化后的值），
+对比两者即可定位。
+
 ---
 
 ## 目录结构
@@ -213,7 +224,8 @@ node tools/selftest.mjs
 ```
 
 覆盖：四类 URL 写法、被折叠斜杠的兼容、白名单放行/拒绝的各个分支、上游 URL 与缓存头的正确性、
-以及 403 / 405 / 400 / 401 等错误分支。当前 29 条断言全部通过。
+以及 403 / 405 / 400 / 401 等错误分支；另外专门覆盖了线上真实的 pathname 形态、
+catch-all 参数为数组 / 被 URL 编码（`%2F`）/ 带 query 等形态。当前 41 条断言全部通过。
 
 ---
 
@@ -229,6 +241,8 @@ node tools/selftest.mjs
 | 版本检测拿到乱码 | 上游返回了压缩内容 —— 本项目已强制 `identity` 编码，若仍出现请检查中间是否还有别的代理 |
 | 插件一直提示"校验未通过" | 检查是否有中间层给 `.icplugin` 加了长缓存，本代理默认只缓存 60 秒 |
 | 首页 404 但 /gh/ 正常 | 根级 catch-all 未在该平台版本生效，统一使用 `/gh/` 前缀即可 |
+| 所有路径都报 400 无法解析 | 看响应头 `x-proxy-raw`（平台传入的原始值）与 `x-proxy-path`（归一化后的值），把两者一起反馈；当前实现已从 `request.url` 取路径，理论上不再受 catch-all 参数形态影响 |
+| 502 但地址明明正确 | 边缘节点回源 GitHub 失败；可先用浏览器直接访问该 GitHub 地址确认其存在，再重试 |
 
 ---
 

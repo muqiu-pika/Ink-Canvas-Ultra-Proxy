@@ -59,9 +59,27 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-export function errorResponse(request, status, message, detail) {
+/**
+ * 取本次要代理的路径。
+ *
+ * 优先用 request.url 的 pathname —— 不依赖平台对 catch-all 参数（context.params）
+ * 的具体形态。不同平台 / 版本给的类型并不一致（字符串、数组、对象都见过），
+ * 一旦猜错就会把所有请求都解析成"无法识别的代理路径"。
+ */
+export function pickPath(context) {
+  try {
+    const u = new URL(context.request.url);
+    if (u.pathname && u.pathname !== '/') return u.pathname;
+  } catch (_) {
+    // 取不到就回落到 params
+  }
+  const p = context && context.params ? context.params.default : undefined;
+  return Array.isArray(p) ? p.join('/') : p || '';
+}
+
+export function errorResponse(request, status, message, detail, extra) {
   if (wantsJson(request)) {
-    return jsonResponse({ error: true, status, message, detail: detail || null }, status);
+    return jsonResponse({ error: true, status, message, detail: detail || null }, status, extra);
   }
   const html = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -80,7 +98,7 @@ ${detail ? `<p><code>${escapeHtml(detail)}</code></p>` : ''}
 </div></body></html>`;
   return new Response(html, {
     status,
-    headers: commonHeaders({ 'content-type': 'text/html; charset=utf-8' }),
+    headers: commonHeaders(Object.assign({ 'content-type': 'text/html; charset=utf-8' }, extra || {})),
   });
 }
 
@@ -101,7 +119,7 @@ function buildUpstreamHeaders(request) {
   return h;
 }
 
-function cleanResponseHeaders(headers, cacheControl, upstreamUrl) {
+function cleanResponseHeaders(headers, cacheControl, upstreamUrl, proxyPath) {
   for (let i = 0; i < STRIP_RESPONSE_HEADERS.length; i++) {
     headers.delete(STRIP_RESPONSE_HEADERS[i]);
   }
@@ -110,6 +128,8 @@ function cleanResponseHeaders(headers, cacheControl, upstreamUrl) {
   headers.set('cache-control', cacheControl);
   headers.set('x-proxy-by', `${PROXY_NAME}/${PROXY_VERSION}`);
   headers.set('x-upstream', upstreamUrl);
+  // 调试用：回显代理实际解析到的路径
+  if (proxyPath) headers.set('x-proxy-path', proxyPath);
   return headers;
 }
 
@@ -145,14 +165,27 @@ export async function handleProxy(request, env, rawPath) {
   }
 
   const normalized = normalizePath(rawPath);
+  const rawEcho = Array.isArray(rawPath)
+    ? rawPath.join('/')
+    : String(rawPath == null ? '' : rawPath);
   const target = parseTarget(normalized);
   if (!target.ok) {
-    return errorResponse(request, 400, '无法解析的代理路径', target.reason);
+    // 回显"平台传进来的是什么"+"归一化后是什么"：
+    // 部署后若再出现解析失败，对比这两个响应头就能立刻定位，不用再猜。
+    return errorResponse(
+      request,
+      400,
+      '无法解析的代理路径',
+      `${target.reason}　｜　解析到的路径：${normalized || '（空）'}　｜　原始入参：${rawEcho || '（空）'}`,
+      { 'x-proxy-path': normalized || '(empty)', 'x-proxy-raw': rawEcho || '(empty)' }
+    );
   }
 
   const policy = checkPolicy(target);
   if (!policy.ok) {
-    return errorResponse(request, policy.code, '该资源不在代理白名单内', policy.reason);
+    return errorResponse(request, policy.code, '该资源不在代理白名单内', policy.reason, {
+      'x-proxy-path': normalized,
+    });
   }
 
   const upstreamUrl = buildUpstreamUrl(target);
@@ -178,7 +211,7 @@ export async function handleProxy(request, env, rawPath) {
     return errorResponse(request, 502, '回源失败', `${upstreamUrl} → 上游无响应`);
   }
 
-  const headers = cleanResponseHeaders(new Headers(upstreamResponse.headers), cacheControl, upstreamUrl);
+  const headers = cleanResponseHeaders(new Headers(upstreamResponse.headers), cacheControl, upstreamUrl, normalized);
 
   // 上游 5xx 统一报 502，避免把 GitHub 的错误页面直接吐给用户
   const status = upstreamResponse.status >= 500 ? 502 : upstreamResponse.status;

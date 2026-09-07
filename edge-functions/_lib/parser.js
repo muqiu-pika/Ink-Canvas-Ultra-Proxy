@@ -25,20 +25,82 @@ import {
   KNOWN_HOSTS,
 } from './config.js';
 
-/** 去掉前导斜杠、可选的 gh/ 前缀、以及被折叠的 scheme，得到纯路径。 */
+/**
+ * 归一化路径。
+ *
+ * 兼容各种"传进来的东西到底是什么"的情况（这是踩过坑的地方）：
+ *   - 完整 URL：https://host/gh/raw/...
+ *   - 纯 pathname：/gh/raw/... 或 raw/...
+ *   - catch-all 参数是数组：['raw','muqiu-pika','Ink-Canvas-Ultra','master','x.txt']
+ *   - 带 gh/ 前缀（根级 catch-all 会把整串传进来）
+ *   - scheme 双斜杠被折叠：https:/github.com/...
+ *   - 路径里混入了 %xx 编码
+ *
+ * 处理顺序：取数组 → 取路径部分（去 query）→ 去前导斜杠 → 剥 gh/ → 截到 GitHub 域名处 → 去 scheme → 解码。
+ */
 export function normalizePath(rawPath) {
-  let p = String(rawPath || '').trim();
-  p = p.replace(/^\/+/, '');
-  // 根目录 catch-all 会把 /gh/xxx 整串传进来，这里统一剥掉 gh/ 前缀
-  if (/^gh(\/|$)/i.test(p)) p = p.length > 2 ? p.slice(3) : '';
-  // https://、https:/、https: 三种形态都还原成"没有 scheme"的纯路径（一律按 https 回源）
-  p = p.replace(/^https?:\/*/i, '');
+  let p = '';
+  if (Array.isArray(rawPath)) {
+    p = rawPath.join('/');
+  } else if (rawPath && typeof rawPath === 'object') {
+    // 某些运行时把 catch-all 参数给成对象，取其中的值再拼
+    p = Object.keys(rawPath)
+      .map((k) => String(rawPath[k]))
+      .join('/');
+  } else {
+    p = String(rawPath == null ? '' : rawPath);
+  }
+  p = p.trim();
+
+  // 先解码一次：部分平台会把 catch-all 参数做 URL 编码后传入
+  //（例如 gh%2Fraw%2Fmuqiu-pika%2F...），不先还原的话连 gh/ 前缀都剥不掉。
   try {
     p = decodeURIComponent(p);
   } catch (_) {
-    // 解码失败就按原样处理（含 % 的非法转义），后续白名单匹配会拦掉
+    // 含非法 % 转义时保持原样
   }
-  return p.replace(/^\/+/, '');
+
+  // 去掉 query 与 hash
+  const cut = p.search(/[?#]/);
+  if (cut >= 0) p = p.slice(0, cut);
+
+  // 反复归一化，直到不再变化（最多 4 轮）。
+  // 之所以要循环：像 /gh/https://github.com/... 这种嵌套形态，
+  // 得先剥掉 gh/ 前缀，才会露出里面的 scheme，一轮处理不完。
+  for (let i = 0; i < 4; i++) {
+    const before = p;
+    p = p.replace(/^\/+/, '');
+
+    // 剥掉 gh/ 前缀（根级 catch-all 会把 /gh/xxx 整串传进来）
+    if (/^gh(\/|$)/i.test(p)) p = p.length > 2 ? p.slice(3) : '';
+
+    // 处理 scheme：https://、https:/（CDN 折叠了双斜杠）、https: 三种都能吃下
+    const m = /^https?:\/*/i.exec(p);
+    if (m) {
+      const rest = p.slice(m[0].length);
+      const slash = rest.indexOf('/');
+      const host = (slash >= 0 ? rest.slice(0, slash) : rest).toLowerCase();
+      // host 是 GitHub → 连 host 一起留着（后面 parseTarget 要用它判断来源）；
+      // 否则说明是我们自己的域名（如 gh.muqiu.eu.org），只保留后面的路径
+      const isGithubHost = /(^|\.)(github\.com|githubusercontent\.com)$/.test(host);
+      p = isGithubHost ? rest : slash >= 0 ? rest.slice(slash) : '';
+    }
+
+    if (p === before) break;
+  }
+
+  // 兜底：路径中间才出现 GitHub 域名时，从域名处截断
+  const marker = p.search(/(?:^|\/)(?:https?:\/*)?(?:raw\.)?github(?:usercontent)?\.com\//i);
+  if (marker > 0) p = p.slice(marker).replace(/^\/+/, '');
+
+  p = p.replace(/^\/+/, '');
+  try {
+    p = decodeURIComponent(p);
+  } catch (_) {
+    // 解码失败（含非法 % 转义）就按原样处理，后续白名单匹配会拦掉
+  }
+
+  return p.replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
 function splitSegments(path) {
