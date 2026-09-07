@@ -1,0 +1,20 @@
+{
+  "buildCommand": "echo 'no static build'",
+  "installCommand": "echo 'skip install'",
+  "outputDirectory": "public",
+  "headers": [
+    {
+      "source": "/health",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=60"
+        },
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "*"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "ink-canvas-ultra-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ink Canvas Ultra 专用的 GitHub 只读反向代理（EdgeOne Pages 边缘函数）",
+  "scripts": {
+    "test": "node tools/selftest.mjs",
+    "check": "node --check edge-functions/index.js && node --check edge-functions/health.js && node --check edge-functions/_lib/config.js && node --check edge-functions/_lib/parser.js && node --check edge-functions/_lib/proxy.js && node --check edge-functions/_lib/home.js"
+  },
+  "license": "GPL-3.0"
+}
